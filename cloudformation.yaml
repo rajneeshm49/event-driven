@@ -1,0 +1,99 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Resources:
+  # DynamoDB Table
+  ProductVisitsTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: ProductVisits
+      AttributeDefinitions:
+        - AttributeName: ProductVisitKey
+          AttributeType: S
+      KeySchema:
+        - AttributeName: ProductVisitKey
+          KeyType: HASH
+      BillingMode: PAY_PER_REQUEST
+
+  # SQS Queue
+  ProductVisitsDataQueue:
+    Type: AWS::SQS::Queue
+    Properties:
+      QueueName: ProductVisitsDataQueue
+
+  # Lambda Function Role
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: simple-app-role
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: LambdaDynamoDBSQSPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                Resource: !GetAtt ProductVisitsTable.Arn
+              - Effect: Allow
+                Action:
+                  - sqs:ReceiveMessage
+                  - sqs:DeleteMessage
+                  - sqs:GetQueueAttributes
+                Resource: !GetAtt ProductVisitsDataQueue.Arn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: arn:aws:logs:*:*:*
+
+  # Lambda Function
+  SimpleAppFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: Simple-App-Function
+      Handler: index.lambda_handler # Correct handler name for index.py
+      Runtime: python3.9
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Code:
+        ZipFile: |
+          import json
+          import boto3
+          import os
+
+          dynamodb = boto3.resource('dynamodb')
+          table_name = os.environ['DYNAMODB_TABLE']
+          table = dynamodb.Table(table_name)
+
+          def lambda_handler(event, context):
+              for record in event['Records']:
+                  body = json.loads(record['body'])
+                  response = table.put_item(
+                      Item={
+                          'ProductVisitKey': body['ProductId'],
+                          'Details': body['ProductName']
+                      }
+                  )
+              return {
+                  'statusCode': 200,
+                  'body': json.dumps('Success')
+              }
+
+      Environment:
+        Variables:
+          DYNAMODB_TABLE: !Ref ProductVisitsTable
+
+  # SQS Lambda Trigger
+  SQSQueueLambdaTrigger:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 10
+      EventSourceArn: !GetAtt ProductVisitsDataQueue.Arn
+      FunctionName: !GetAtt SimpleAppFunction.Arn
+      Enabled: True
